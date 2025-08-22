@@ -145,111 +145,85 @@ def extract_basin_from_url(url):
 
 @st.cache_data(ttl=7200)
 def get_storms_for_basin_year(basin_name, year):
-    """Get list of storms for a specific basin and year by parsing the column structure."""
+    """
+    Get list of storms for a specific basin and year by parsing the column structure.
+    This revised function is more robust in finding the correct table and extracting
+    data specifically from the requested basin's column.
+    """
     try:
         year_page_url = f"https://ncics.org/ibtracs/index.php?name=YearBasin-{year}"
-        
         response = requests.get(year_page_url, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        
+
         basin_config = BASINS[basin_name]
-        target_column = basin_config["column_index"]
+        target_column_index = basin_config["column_index"]
         
         storms = []
-        
-        # Find the main table with storm data
-        # Look for the table that contains basin headers
         main_table = None
+
+        # 1. Find the main data table more reliably
+        # A good heuristic is to find the table whose header contains the basin names.
         for table in soup.find_all('table'):
-            # Look for table headers that contain basin names
-            header_cells = table.find_all(['th', 'td'])
-            header_text = ' '.join([cell.get_text() for cell in header_cells])
-            if 'Northern Atlantic' in header_text and 'Eastern Pacific' in header_text:
+            header_text = ' '.join(th.get_text() for th in table.find_all('th'))
+            if all(b_info["column_name"] in header_text for b_info in BASINS.values()):
                 main_table = table
                 break
         
         if not main_table:
-            # Fallback: look for any table with multiple columns that might contain storm data
-            for table in soup.find_all('table'):
-                rows = table.find_all('tr')
-                if len(rows) > 5:  # Must have multiple rows
-                    first_row = rows[0] if rows else None
-                    if first_row and len(first_row.find_all(['th', 'td'])) >= 6:  # Must have 6+ columns (for 6 basins)
-                        main_table = table
-                        break
-        
-        if main_table:
-            rows = main_table.find_all('tr')
+            st.warning(f"Could not find a valid storm data table for {year}. The page structure may have changed.")
+            return []
+
+        # 2. Iterate through rows and process the correct column
+        rows = main_table.find_all('tr')
+        # Skip header row(s)
+        for row in rows[1:]:
+            cells = row.find_all(['td', 'th'])
             
-            # Skip header row(s) - find the first row with actual storm data
-            start_row = 0
-            for i, row in enumerate(rows):
-                cells = row.find_all(['td', 'th'])
-                if len(cells) >= 6:  # Should have at least 6 columns for 6 basins
-                    # Check if this looks like a header row
-                    cell_text = ' '.join([cell.get_text().strip() for cell in cells])
-                    if any(basin_name in cell_text for basin_name in ['Northern Atlantic', 'Eastern Pacific', 'Western Pacific']):
-                        start_row = i + 1
-                        break
-                    elif i > 0:  # If we're past the first row and found a data row, use it
-                        start_row = i
-                        break
-            
-            # Extract storms from the target column
-            for row in rows[start_row:]:
-                cells = row.find_all(['td', 'th'])
+            # Ensure the row has enough columns for our target basin
+            if len(cells) > target_column_index:
+                target_cell = cells[target_column_index]
                 
-                if len(cells) > target_column:
-                    cell = cells[target_column]
-                    
-                    # Look for storm links in this cell
-                    storm_links = cell.find_all('a', href=True)
-                    
-                    for link in storm_links:
-                        if 'name=v04r01-' in link['href']:
-                            storm_text = link.get_text().strip()
-                            link_url = urljoin(year_page_url, link['href'])
-                            
-                            if storm_text and len(storm_text) > 0:
-                                # Clean up storm name
-                                # Remove asterisks and dates
-                                clean_name = re.sub(r'\*', '', storm_text)
-                                clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-\d{1,2}', '', clean_name)
-                                clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-[A-Z][a-z]{2}\s+\d{1,2}', '', clean_name)
-                                clean_name = clean_name.strip()
-                                
-                                # Use the clean name or fall back to original
-                                display_name = clean_name if clean_name else storm_text
-                                
-                                storms.append({
-                                    'display_name': display_name,
-                                    'storm_name': display_name,
-                                    'url': link_url,
-                                    'basin': basin_config["code"]
-                                })
-                    
-                    # Also check for text-only storm names (no links)
-                    cell_text = cell.get_text().strip()
-                    if cell_text and not storm_links and cell_text not in ['', '-']:
-                        # This might be a storm without a link
-                        lines = cell_text.split('\n')
-                        for line in lines:
-                            line = line.strip()
-                            if line and not any(char.isdigit() for char in line[:3]):  # Skip date lines
-                                clean_name = re.sub(r'\*', '', line)
-                                clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-\d{1,2}', '', clean_name)
-                                clean_name = clean_name.strip()
-                                
-                                if clean_name and len(clean_name) > 2:
+                # 3. Extract all links from within that specific cell
+                storm_links = target_cell.find_all('a', href=True)
+                
+                if not storm_links:
+                    # Handle cases where the storm is just text (no link)
+                    cell_text = target_cell.get_text(separator='\n').strip()
+                    if cell_text and cell_text != '-':
+                        # The cell might contain multiple storms separated by newlines
+                        potential_storms = [line.strip() for line in cell_text.split('\n') if line.strip()]
+                        for storm_text in potential_storms:
+                            # A simple check to avoid adding date lines as storms
+                            if not re.search(r'^[A-Z][a-z]{2}', storm_text):
+                                clean_name = re.sub(r'\*$', '', storm_text).strip() # Remove trailing asterisk
+                                if clean_name:
                                     storms.append({
                                         'display_name': f"{clean_name} (No track data)",
                                         'storm_name': clean_name,
                                         'url': None,
                                         'basin': basin_config["code"]
                                     })
+                else:
+                    for link in storm_links:
+                        # 4. Clean the storm name by removing dates and asterisks
+                        storm_text = link.get_text().strip()
+                        if 'name=v04r01-' in link['href'] and storm_text:
+                            # Regex to remove dates like "May 28-30" or "Jul 31-Aug 11"
+                            date_pattern = r'\s+[A-Z][a-z]{2}\s+\d{1,2}(?:-(?:[A-Z][a-z]{2}\s+)?\d{1,2})?'
+                            clean_name = re.sub(date_pattern, '', storm_text)
+                            # Remove asterisks and any remaining whitespace
+                            clean_name = re.sub(r'\*$', '', clean_name).strip()
+                            
+                            if clean_name:
+                                storms.append({
+                                    'display_name': clean_name,
+                                    'storm_name': clean_name,
+                                    'url': urljoin(year_page_url, link['href']),
+                                    'basin': basin_config["code"]
+                                })
         
-        # Remove duplicates and sort
+        # 5. Remove duplicates and sort for a clean list
         seen = set()
         unique_storms = []
         for storm in storms:
@@ -259,11 +233,10 @@ def get_storms_for_basin_year(basin_name, year):
                 unique_storms.append(storm)
         
         unique_storms.sort(key=lambda x: x['storm_name'])
-        
         return unique_storms
         
     except Exception as e:
-        st.error(f"Error fetching storms for {basin_name} {year}: {e}")
+        st.error(f"Failed to fetch or parse storms for {year} in {basin_name}: {e}")
         return []
 
 @st.cache_data(ttl=3600)
