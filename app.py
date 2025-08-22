@@ -145,98 +145,129 @@ def extract_basin_from_url(url):
 
 @st.cache_data(ttl=7200)
 def get_storms_for_basin_year(basin_name, year):
-    """
-    Get list of storms for a specific basin and year by parsing the column structure.
-    This revised function is more robust in finding the correct table and extracting
-    data specifically from the requested basin's column.
-    """
+    """Get list of storms for a specific basin and year by parsing the column structure."""
     try:
         year_page_url = f"https://ncics.org/ibtracs/index.php?name=YearBasin-{year}"
+        
         response = requests.get(year_page_url, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-
+        
         basin_config = BASINS[basin_name]
-        target_column_index = basin_config["column_index"]
+        target_column = basin_config["column_index"]
         
         storms = []
+        
+        # Find all tables and look for the one with basin data
         main_table = None
-
-        # 1. Find the main data table more reliably
-        # A good heuristic is to find the table whose header contains the basin names.
+        
+        # Look for tables that have the basin headers
         for table in soup.find_all('table'):
-            header_text = ' '.join(th.get_text() for th in table.find_all('th'))
-            if all(b_info["column_name"] in header_text for b_info in BASINS.values()):
+            # Get all text from the table to check for basin names
+            table_text = table.get_text()
+            
+            # Check if this table contains multiple basin names
+            basin_count = 0
+            for basin_key in BASINS.keys():
+                basin_column_name = BASINS[basin_key]["column_name"]
+                if basin_column_name in table_text:
+                    basin_count += 1
+            
+            # If we found multiple basins, this is likely our main table
+            if basin_count >= 3:  # At least 3 basin names found
                 main_table = table
                 break
         
         if not main_table:
-            st.warning(f"Could not find a valid storm data table for {year}. The page structure may have changed.")
+            st.warning(f"Could not find main basin table for {year}")
             return []
-
-        # 2. Iterate through rows and process the correct column
+        
+        # Parse the table structure more carefully
         rows = main_table.find_all('tr')
-        # Skip header row(s)
-        for row in rows[1:]:
+        
+        # Find the header row that contains basin names
+        header_row_index = -1
+        for i, row in enumerate(rows):
+            row_text = row.get_text()
+            if basin_config["column_name"] in row_text:
+                header_row_index = i
+                break
+        
+        if header_row_index == -1:
+            st.warning(f"Could not find header row for {basin_name}")
+            return []
+        
+        # Process data rows starting after the header
+        for row_index in range(header_row_index + 1, len(rows)):
+            row = rows[row_index]
             cells = row.find_all(['td', 'th'])
             
-            # Ensure the row has enough columns for our target basin
-            if len(cells) > target_column_index:
-                target_cell = cells[target_column_index]
-                
-                # 3. Extract all links from within that specific cell
-                storm_links = target_cell.find_all('a', href=True)
-                
-                if not storm_links:
-                    # Handle cases where the storm is just text (no link)
-                    cell_text = target_cell.get_text(separator='\n').strip()
-                    if cell_text and cell_text != '-':
-                        # The cell might contain multiple storms separated by newlines
-                        potential_storms = [line.strip() for line in cell_text.split('\n') if line.strip()]
-                        for storm_text in potential_storms:
-                            # A simple check to avoid adding date lines as storms
-                            if not re.search(r'^[A-Z][a-z]{2}', storm_text):
-                                clean_name = re.sub(r'\*$', '', storm_text).strip() # Remove trailing asterisk
-                                if clean_name:
-                                    storms.append({
-                                        'display_name': f"{clean_name} (No track data)",
-                                        'storm_name': clean_name,
-                                        'url': None,
-                                        'basin': basin_config["code"]
-                                    })
-                else:
-                    for link in storm_links:
-                        # 4. Clean the storm name by removing dates and asterisks
-                        storm_text = link.get_text().strip()
-                        if 'name=v04r01-' in link['href'] and storm_text:
-                            # Regex to remove dates like "May 28-30" or "Jul 31-Aug 11"
-                            date_pattern = r'\s+[A-Z][a-z]{2}\s+\d{1,2}(?:-(?:[A-Z][a-z]{2}\s+)?\d{1,2})?'
-                            clean_name = re.sub(date_pattern, '', storm_text)
-                            # Remove asterisks and any remaining whitespace
-                            clean_name = re.sub(r'\*$', '', clean_name).strip()
+            # Make sure we have enough columns
+            if len(cells) <= target_column:
+                continue
+            
+            target_cell = cells[target_column]
+            
+            # Extract storm links from this cell
+            storm_links = target_cell.find_all('a', href=True)
+            
+            for link in storm_links:
+                if 'name=v04r01-' in link['href']:
+                    storm_text = link.get_text().strip()
+                    link_url = urljoin(year_page_url, link['href'])
+                    
+                    if storm_text and len(storm_text) > 0:
+                        # Clean up storm name
+                        clean_name = re.sub(r'\*', '', storm_text)
+                        clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-\d{1,2}', '', clean_name)
+                        clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-[A-Z][a-z]{2}\s+\d{1,2}', '', clean_name)
+                        clean_name = clean_name.strip()
+                        
+                        display_name = clean_name if clean_name else storm_text
+                        
+                        storms.append({
+                            'display_name': display_name,
+                            'storm_name': display_name,
+                            'url': link_url,
+                            'basin': basin_config["code"]
+                        })
+            
+            # Also check for text-only storm names (storms without track data)
+            if not storm_links:
+                cell_text = target_cell.get_text().strip()
+                if cell_text and cell_text not in ['', '-', 'UNNAMED']:
+                    # Split by lines to handle multiple storms in one cell
+                    lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
+                    for line in lines:
+                        # Skip date-like patterns
+                        if not re.match(r'^[A-Z][a-z]{2}\s+\d', line):
+                            clean_name = re.sub(r'\*', '', line)
+                            clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-\d{1,2}', '', clean_name)
+                            clean_name = clean_name.strip()
                             
-                            if clean_name:
+                            if clean_name and len(clean_name) > 1:
                                 storms.append({
-                                    'display_name': clean_name,
+                                    'display_name': f"{clean_name} (No track data)",
                                     'storm_name': clean_name,
-                                    'url': urljoin(year_page_url, link['href']),
+                                    'url': None,
                                     'basin': basin_config["code"]
                                 })
         
-        # 5. Remove duplicates and sort for a clean list
+        # Remove duplicates and sort
         seen = set()
         unique_storms = []
         for storm in storms:
-            identifier = storm['storm_name'].upper()
+            identifier = f"{storm['storm_name'].upper()}_{storm['basin']}"
             if identifier not in seen:
                 seen.add(identifier)
                 unique_storms.append(storm)
         
         unique_storms.sort(key=lambda x: x['storm_name'])
+        
         return unique_storms
         
     except Exception as e:
-        st.error(f"Failed to fetch or parse storms for {year} in {basin_name}: {e}")
+        st.error(f"Error fetching storms for {basin_name} {year}: {e}")
         return []
 
 @st.cache_data(ttl=3600)
@@ -625,6 +656,10 @@ def main():
                 st.error("❌ This storm has no available track data in IBTrACS.")
                 st.info("💡 Please select a different storm.")
             else:
+                # Initialize stats to prevent UnboundLocalError
+                stats = None
+                fig = None
+                
                 try:
                     with st.spinner(f"Generating plot for {selected_storm['storm_name']}..."):
                         # Extract storm data
@@ -646,59 +681,63 @@ def main():
                         st.success("✅ Storm track plot generated successfully!")
                         st.info("💡 Right-click on the plot to save it to your device.")
                         
-                        # Display statistics
-                        st.subheader(f"📊 {stats['storm_type']} {selected_storm['storm_name']} ({selected_year}) Statistics")
-                        
-                        col1_stats, col2_stats, col3_stats, col4_stats = st.columns(4)
-                        
-                        with col1_stats:
-                            st.metric("Duration", f"{stats['duration_days']:.1f} days")
-                            st.metric("Track Points", f"{stats['track_points']}")
-                        
-                        with col2_stats:
-                            if not pd.isna(stats['max_wind']):
-                                st.metric("Peak Winds", f"{stats['max_wind']:.0f} kt")
-                                st.metric("Peak Winds (mph)", f"{stats['max_wind_mph']} mph")
-                            else:
-                                st.metric("Peak Winds", "N/A")
-                        
-                        with col3_stats:
-                            if not pd.isna(stats['min_pressure']):
-                                st.metric("Min Pressure", f"{stats['min_pressure']:.0f} mb")
-                            else:
-                                st.metric("Min Pressure", "N/A")
-                            
-                            if stats['ace_value'] > 0:
-                                st.metric("ACE Value", f"{stats['ace_value']:.1f}")
-                            else:
-                                st.metric("ACE Value", "N/A")
-                        
-                        with col4_stats:
-                            lat_min, lat_max = stats['lat_extent']
-                            lon_min, lon_max = stats['lon_extent']
-                            st.metric("Latitude Range", f"{lat_min:.1f}°N to {lat_max:.1f}°N")
-                            st.metric("Longitude Range", f"{lon_min:.1f}°E to {lon_max:.1f}°E")
-                        
-                        # Intensity breakdown
-                        if stats['categories']:
-                            st.subheader("🎯 Intensity Distribution")
-                            cat_counts = pd.Series(stats['categories']).value_counts()
-                            
-                            intensity_data = []
-                            for cat in ['TD', 'TS', 'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']:
-                                if cat in cat_counts:
-                                    intensity_data.append({
-                                        'Category': cat,
-                                        'Points': cat_counts[cat],
-                                        'Hours': cat_counts[cat] * 6
-                                    })
-                            
-                            if intensity_data:
-                                st.dataframe(pd.DataFrame(intensity_data), use_container_width=True)
-                        
                 except Exception as e:
                     st.error(f"❌ Error generating plot: {e}")
                     st.info("💡 Please try a different storm or check your internet connection.")
+                    if fig is not None:
+                        plt.close(fig)
+                
+                # Display statistics only if stats was successfully created
+                if stats is not None:
+                    st.subheader(f"📊 {stats['storm_type']} {selected_storm['storm_name']} ({selected_year}) Statistics")
+                    
+                    col1_stats, col2_stats, col3_stats, col4_stats = st.columns(4)
+                    
+                    with col1_stats:
+                        st.metric("Duration", f"{stats['duration_days']:.1f} days")
+                        st.metric("Track Points", f"{stats['track_points']}")
+                    
+                    with col2_stats:
+                        if not pd.isna(stats['max_wind']):
+                            st.metric("Peak Winds", f"{stats['max_wind']:.0f} kt")
+                            st.metric("Peak Winds (mph)", f"{stats['max_wind_mph']} mph")
+                        else:
+                            st.metric("Peak Winds", "N/A")
+                            st.metric("Peak Winds (mph)", "N/A")
+                    
+                    with col3_stats:
+                        if not pd.isna(stats['min_pressure']):
+                            st.metric("Min Pressure", f"{stats['min_pressure']:.0f} mb")
+                        else:
+                            st.metric("Min Pressure", "N/A")
+                        
+                        if stats['ace_value'] > 0:
+                            st.metric("ACE Value", f"{stats['ace_value']:.1f}")
+                        else:
+                            st.metric("ACE Value", "N/A")
+                    
+                    with col4_stats:
+                        lat_min, lat_max = stats['lat_extent']
+                        lon_min, lon_max = stats['lon_extent']
+                        st.metric("Latitude Range", f"{lat_min:.1f}°N to {lat_max:.1f}°N")
+                        st.metric("Longitude Range", f"{lon_min:.1f}°E to {lon_max:.1f}°E")
+                    
+                    # Intensity breakdown
+                    if stats['categories']:
+                        st.subheader("🎯 Intensity Distribution")
+                        cat_counts = pd.Series(stats['categories']).value_counts()
+                        
+                        intensity_data = []
+                        for cat in ['TD', 'TS', 'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']:
+                            if cat in cat_counts:
+                                intensity_data.append({
+                                    'Category': cat,
+                                    'Points': cat_counts[cat],
+                                    'Hours': cat_counts[cat] * 6
+                                })
+                        
+                        if intensity_data:
+                            st.dataframe(pd.DataFrame(intensity_data), use_container_width=True)
         
         elif not selected_basin or not selected_year:
             st.info("👆 Please select a basin and year from the dropdown menus on the left.")
