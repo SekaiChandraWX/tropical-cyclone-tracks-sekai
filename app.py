@@ -26,37 +26,37 @@ st.set_page_config(
     layout="wide"
 )
 
-# Basin configuration with better filtering
+# Basin configuration with correct column mapping
 BASINS = {
     "Atlantic (NATL)": {
         "code": "NATL", 
-        "search_terms": ["AL", "NATL"],
-        "url_patterns": ["AL", "NATL"]
+        "column_index": 0,
+        "column_name": "Northern Atlantic"
     },
     "East/Central Pacific (EPAC/CPAC)": {
         "code": "EPAC", 
-        "search_terms": ["EP", "CP", "EPAC", "CPAC"],
-        "url_patterns": ["EP", "CP"]
+        "column_index": 1,
+        "column_name": "Eastern Pacific"
     },
     "West Pacific (WPAC)": {
         "code": "WPAC", 
-        "search_terms": ["WP", "WPAC"],
-        "url_patterns": ["WP", "WPAC"]
+        "column_index": 2,
+        "column_name": "Western Pacific"
     },
     "Northern Indian Ocean (NIO)": {
         "code": "NIO", 
-        "search_terms": ["IO", "NIO", "BB", "AS"],
-        "url_patterns": ["IO", "NI", "BB", "AS"]
+        "column_index": 3,
+        "column_name": "Northern Indian"
     },
     "Southern Indian Ocean (SIO)": {
         "code": "SIO", 
-        "search_terms": ["SI", "SIO"],
-        "url_patterns": ["SI", "SIO"]
+        "column_index": 4,
+        "column_name": "Southern Indian"
     },
     "Australian Region (AUSW/AUSE)": {
         "code": "AUS", 
-        "search_terms": ["AU", "SP", "AUSW", "AUSE"],
-        "url_patterns": ["AU", "SP"]
+        "column_index": 5,
+        "column_name": "Southern Pacific"
     }
 }
 
@@ -140,35 +140,12 @@ def format_datetime(datetime_str):
         return "N/A"
 
 def extract_basin_from_url(url):
-    """Extract basin code from IBTrACS URL."""
-    try:
-        # IBTrACS URLs contain basin info like: v04r01-1992236N25284 where the last part indicates basin
-        # Extract the storm ID part
-        match = re.search(r'v04r01-(\d{4})(\d{3})([NS])(\d+)', url)
-        if match:
-            year, day_of_year, hemisphere, number = match.groups()
-            
-            # Additional parsing based on URL patterns and known IBTrACS structure
-            if 'AL' in url or 'NATL' in url:
-                return 'NATL'
-            elif 'EP' in url or 'CP' in url:
-                return 'EPAC'
-            elif 'WP' in url:
-                return 'WPAC'
-            elif 'IO' in url or 'NI' in url or 'BB' in url or 'AS' in url:
-                return 'NIO'
-            elif 'SI' in url:
-                return 'SIO'
-            elif 'AU' in url or 'SP' in url:
-                return 'AUS'
-        
-        return 'UNKNOWN'
-    except:
-        return 'UNKNOWN'
+    """Extract basin code from IBTrACS URL - kept for compatibility."""
+    return 'UNKNOWN'
 
 @st.cache_data(ttl=7200)
 def get_storms_for_basin_year(basin_name, year):
-    """Get list of storms for a specific basin and year with proper filtering."""
+    """Get list of storms for a specific basin and year by parsing the column structure."""
     try:
         year_page_url = f"https://ncics.org/ibtracs/index.php?name=YearBasin-{year}"
         
@@ -177,59 +154,113 @@ def get_storms_for_basin_year(basin_name, year):
         soup = BeautifulSoup(response.content, 'html.parser')
         
         basin_config = BASINS[basin_name]
-        url_patterns = basin_config["url_patterns"]
+        target_column = basin_config["column_index"]
         
         storms = []
         
-        # Find all storm links
-        for link in soup.find_all('a', href=True):
-            if 'name=v04r01-' in link['href']:
-                storm_text = link.text.strip()
-                link_url = urljoin(year_page_url, link['href'])
+        # Find the main table with storm data
+        # Look for the table that contains basin headers
+        main_table = None
+        for table in soup.find_all('table'):
+            # Look for table headers that contain basin names
+            header_cells = table.find_all(['th', 'td'])
+            header_text = ' '.join([cell.get_text() for cell in header_cells])
+            if 'Northern Atlantic' in header_text and 'Eastern Pacific' in header_text:
+                main_table = table
+                break
+        
+        if not main_table:
+            # Fallback: look for any table with multiple columns that might contain storm data
+            for table in soup.find_all('table'):
+                rows = table.find_all('tr')
+                if len(rows) > 5:  # Must have multiple rows
+                    first_row = rows[0] if rows else None
+                    if first_row and len(first_row.find_all(['th', 'td'])) >= 6:  # Must have 6+ columns (for 6 basins)
+                        main_table = table
+                        break
+        
+        if main_table:
+            rows = main_table.find_all('tr')
+            
+            # Skip header row(s) - find the first row with actual storm data
+            start_row = 0
+            for i, row in enumerate(rows):
+                cells = row.find_all(['td', 'th'])
+                if len(cells) >= 6:  # Should have at least 6 columns for 6 basins
+                    # Check if this looks like a header row
+                    cell_text = ' '.join([cell.get_text().strip() for cell in cells])
+                    if any(basin_name in cell_text for basin_name in ['Northern Atlantic', 'Eastern Pacific', 'Western Pacific']):
+                        start_row = i + 1
+                        break
+                    elif i > 0:  # If we're past the first row and found a data row, use it
+                        start_row = i
+                        break
+            
+            # Extract storms from the target column
+            for row in rows[start_row:]:
+                cells = row.find_all(['td', 'th'])
                 
-                # Extract basin from URL or storm text
-                detected_basin = extract_basin_from_url(link_url)
-                
-                # Check if storm belongs to selected basin
-                basin_match = False
-                
-                # Method 1: Check detected basin
-                if detected_basin == basin_config["code"]:
-                    basin_match = True
-                
-                # Method 2: Check URL patterns
-                if not basin_match:
-                    for pattern in url_patterns:
-                        if pattern.lower() in link_url.lower() or pattern.lower() in storm_text.lower():
-                            basin_match = True
-                            break
-                
-                # Method 3: Geographic logic for some basins
-                if not basin_match and storm_text:
-                    try:
-                        # Quick geographic check for some obvious cases
-                        if basin_name == "Atlantic (NATL)" and any(term in storm_text.upper() for term in ['AL', 'ATLANTIC']):
-                            basin_match = True
-                        elif basin_name == "West Pacific (WPAC)" and any(term in storm_text.upper() for term in ['WP', 'WPAC']):
-                            basin_match = True
-                    except:
-                        pass
-                
-                if basin_match and storm_text and len(storm_text) > 0:
-                    # Extract clean storm name
-                    storm_name = storm_text.split()[-1] if ' ' in storm_text else storm_text
+                if len(cells) > target_column:
+                    cell = cells[target_column]
                     
-                    storms.append({
-                        'display_name': storm_text,
-                        'storm_name': storm_name,
-                        'url': link_url,
-                        'basin': detected_basin
-                    })
+                    # Look for storm links in this cell
+                    storm_links = cell.find_all('a', href=True)
+                    
+                    for link in storm_links:
+                        if 'name=v04r01-' in link['href']:
+                            storm_text = link.get_text().strip()
+                            link_url = urljoin(year_page_url, link['href'])
+                            
+                            if storm_text and len(storm_text) > 0:
+                                # Clean up storm name
+                                # Remove asterisks and dates
+                                clean_name = re.sub(r'\*', '', storm_text)
+                                clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-\d{1,2}', '', clean_name)
+                                clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-[A-Z][a-z]{2}\s+\d{1,2}', '', clean_name)
+                                clean_name = clean_name.strip()
+                                
+                                # Use the clean name or fall back to original
+                                display_name = clean_name if clean_name else storm_text
+                                
+                                storms.append({
+                                    'display_name': display_name,
+                                    'storm_name': display_name,
+                                    'url': link_url,
+                                    'basin': basin_config["code"]
+                                })
+                    
+                    # Also check for text-only storm names (no links)
+                    cell_text = cell.get_text().strip()
+                    if cell_text and not storm_links and cell_text not in ['', '-']:
+                        # This might be a storm without a link
+                        lines = cell_text.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if line and not any(char.isdigit() for char in line[:3]):  # Skip date lines
+                                clean_name = re.sub(r'\*', '', line)
+                                clean_name = re.sub(r'\s+[A-Z][a-z]{2}\s+\d{1,2}-\d{1,2}', '', clean_name)
+                                clean_name = clean_name.strip()
+                                
+                                if clean_name and len(clean_name) > 2:
+                                    storms.append({
+                                        'display_name': f"{clean_name} (No track data)",
+                                        'storm_name': clean_name,
+                                        'url': None,
+                                        'basin': basin_config["code"]
+                                    })
         
-        # Sort storms by name
-        storms.sort(key=lambda x: x['storm_name'])
+        # Remove duplicates and sort
+        seen = set()
+        unique_storms = []
+        for storm in storms:
+            identifier = storm['storm_name'].upper()
+            if identifier not in seen:
+                seen.add(identifier)
+                unique_storms.append(storm)
         
-        return storms
+        unique_storms.sort(key=lambda x: x['storm_name'])
+        
+        return unique_storms
         
     except Exception as e:
         st.error(f"Error fetching storms for {basin_name} {year}: {e}")
@@ -582,6 +613,11 @@ def main():
             help="Choose the year when the storm occurred"
         )
         
+        # Initialize variables
+        selected_storm_display = ""
+        storms = []
+        generate_button = False
+        
         # Storm selection (only show after basin and year are selected)
         if selected_basin and selected_year:
             with st.spinner(f"Loading storms for {selected_basin} {selected_year}..."):
@@ -603,95 +639,101 @@ def main():
                 generate_button = st.button("🚀 Generate Storm Track Plot", type="primary")
             else:
                 st.warning(f"No storms found for {selected_basin} in {selected_year}")
-                generate_button = False
-        else:
-            generate_button = False
+                st.info(f"💡 Try a different year - some years may have limited data for {selected_basin}")
     
     with col2:
         st.subheader("📊 Storm Track Visualization")
         
-        if generate_button and selected_storm_display:
+        if generate_button and selected_storm_display and selected_storm_display != "":
             selected_storm = storm_options[selected_storm_display]
             
-            try:
-                with st.spinner(f"Generating plot for {selected_storm['storm_name']}..."):
-                    # Extract storm data
-                    storm_data = extract_storm_data(selected_storm['url'])
-                    
-                    # Create plot
-                    fig, stats = create_storm_plot(
-                        storm_data, 
-                        selected_storm['storm_name'], 
-                        selected_year, 
-                        selected_basin
-                    )
-                    
-                    # Display plot
-                    st.pyplot(fig, use_container_width=True)
-                    plt.close(fig)
-                    gc.collect()
-                    
-                    st.success("✅ Storm track plot generated successfully!")
-                    st.info("💡 Right-click on the plot to save it to your device.")
-                    
-                    # Display statistics
-                    st.subheader(f"📊 {stats['storm_type']} {selected_storm['storm_name']} ({selected_year}) Statistics")
-                    
-                    col1_stats, col2_stats, col3_stats, col4_stats = st.columns(4)
-                    
-                    with col1_stats:
-                        st.metric("Duration", f"{stats['duration_days']:.1f} days")
-                        st.metric("Track Points", f"{stats['track_points']}")
-                    
-                    with col2_stats:
-                        if not pd.isna(stats['max_wind']):
-                            st.metric("Peak Winds", f"{stats['max_wind']:.0f} kt")
-                            st.metric("Peak Winds (mph)", f"{stats['max_wind_mph']} mph")
-                        else:
-                            st.metric("Peak Winds", "N/A")
-                    
-                    with col3_stats:
-                        if not pd.isna(stats['min_pressure']):
-                            st.metric("Min Pressure", f"{stats['min_pressure']:.0f} mb")
-                        else:
-                            st.metric("Min Pressure", "N/A")
+            # Check if storm has track data
+            if selected_storm['url'] is None:
+                st.error("❌ This storm has no available track data in IBTrACS.")
+                st.info("💡 Please select a different storm.")
+            else:
+                try:
+                    with st.spinner(f"Generating plot for {selected_storm['storm_name']}..."):
+                        # Extract storm data
+                        storm_data = extract_storm_data(selected_storm['url'])
                         
-                        if stats['ace_value'] > 0:
-                            st.metric("ACE Value", f"{stats['ace_value']:.1f}")
-                        else:
-                            st.metric("ACE Value", "N/A")
-                    
-                    with col4_stats:
-                        lat_min, lat_max = stats['lat_extent']
-                        lon_min, lon_max = stats['lon_extent']
-                        st.metric("Latitude Range", f"{lat_min:.1f}°N to {lat_max:.1f}°N")
-                        st.metric("Longitude Range", f"{lon_min:.1f}°E to {lon_max:.1f}°E")
-                    
-                    # Intensity breakdown
-                    if stats['categories']:
-                        st.subheader("🎯 Intensity Distribution")
-                        cat_counts = pd.Series(stats['categories']).value_counts()
+                        # Create plot
+                        fig, stats = create_storm_plot(
+                            storm_data, 
+                            selected_storm['storm_name'], 
+                            selected_year, 
+                            selected_basin
+                        )
                         
-                        intensity_data = []
-                        for cat in ['TD', 'TS', 'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']:
-                            if cat in cat_counts:
-                                intensity_data.append({
-                                    'Category': cat,
-                                    'Points': cat_counts[cat],
-                                    'Hours': cat_counts[cat] * 6
-                                })
+                        # Display plot
+                        st.pyplot(fig, use_container_width=True)
+                        plt.close(fig)
+                        gc.collect()
                         
-                        if intensity_data:
-                            st.dataframe(pd.DataFrame(intensity_data), use_container_width=True)
-                    
-            except Exception as e:
-                st.error(f"❌ Error generating plot: {e}")
-                st.info("💡 Please try a different storm or check your internet connection.")
+                        st.success("✅ Storm track plot generated successfully!")
+                        st.info("💡 Right-click on the plot to save it to your device.")
+                        
+                        # Display statistics
+                        st.subheader(f"📊 {stats['storm_type']} {selected_storm['storm_name']} ({selected_year}) Statistics")
+                        
+                        col1_stats, col2_stats, col3_stats, col4_stats = st.columns(4)
+                        
+                        with col1_stats:
+                            st.metric("Duration", f"{stats['duration_days']:.1f} days")
+                            st.metric("Track Points", f"{stats['track_points']}")
+                        
+                        with col2_stats:
+                            if not pd.isna(stats['max_wind']):
+                                st.metric("Peak Winds", f"{stats['max_wind']:.0f} kt")
+                                st.metric("Peak Winds (mph)", f"{stats['max_wind_mph']} mph")
+                            else:
+                                st.metric("Peak Winds", "N/A")
+                        
+                        with col3_stats:
+                            if not pd.isna(stats['min_pressure']):
+                                st.metric("Min Pressure", f"{stats['min_pressure']:.0f} mb")
+                            else:
+                                st.metric("Min Pressure", "N/A")
+                            
+                            if stats['ace_value'] > 0:
+                                st.metric("ACE Value", f"{stats['ace_value']:.1f}")
+                            else:
+                                st.metric("ACE Value", "N/A")
+                        
+                        with col4_stats:
+                            lat_min, lat_max = stats['lat_extent']
+                            lon_min, lon_max = stats['lon_extent']
+                            st.metric("Latitude Range", f"{lat_min:.1f}°N to {lat_max:.1f}°N")
+                            st.metric("Longitude Range", f"{lon_min:.1f}°E to {lon_max:.1f}°E")
+                        
+                        # Intensity breakdown
+                        if stats['categories']:
+                            st.subheader("🎯 Intensity Distribution")
+                            cat_counts = pd.Series(stats['categories']).value_counts()
+                            
+                            intensity_data = []
+                            for cat in ['TD', 'TS', 'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']:
+                                if cat in cat_counts:
+                                    intensity_data.append({
+                                        'Category': cat,
+                                        'Points': cat_counts[cat],
+                                        'Hours': cat_counts[cat] * 6
+                                    })
+                            
+                            if intensity_data:
+                                st.dataframe(pd.DataFrame(intensity_data), use_container_width=True)
+                        
+                except Exception as e:
+                    st.error(f"❌ Error generating plot: {e}")
+                    st.info("💡 Please try a different storm or check your internet connection.")
         
         elif not selected_basin or not selected_year:
             st.info("👆 Please select a basin and year from the dropdown menus on the left.")
         
-        elif not selected_storm_display:
+        elif not storms:
+            st.info("👆 No storms found for the selected basin and year.")
+        
+        elif not selected_storm_display or selected_storm_display == "":
             st.info("👆 Please select a storm from the dropdown menu on the left.")
     
     # About section at bottom
