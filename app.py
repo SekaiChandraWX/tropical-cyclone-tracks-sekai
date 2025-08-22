@@ -14,7 +14,8 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 from urllib.parse import urljoin
 import warnings
-import io
+import gc
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -22,21 +23,44 @@ warnings.filterwarnings('ignore')
 st.set_page_config(
     page_title="Tropical Cyclone Track Plotter",
     page_icon="🌀",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Basin configuration
+# Basin configuration with better filtering
 BASINS = {
-    "Atlantic (NATL)": {"code": "NATL", "search_terms": ["NATL", "AL"]},
-    "East/Central Pacific (EPAC/CPAC)": {"code": "EPAC", "search_terms": ["EPAC", "CPAC", "EP", "CP"]},
-    "West Pacific (WPAC)": {"code": "WPAC", "search_terms": ["WPAC", "WP"]},
-    "Northern Indian Ocean (NIO)": {"code": "NIO", "search_terms": ["NIO", "IO", "BB", "AS"]},
-    "Southern Indian Ocean (SIO)": {"code": "SIO", "search_terms": ["SIO", "SI"]},
-    "Australian Region (AUSW/AUSE)": {"code": "AUS", "search_terms": ["AUSW", "AUSE", "AU", "SP"]}
+    "Atlantic (NATL)": {
+        "code": "NATL", 
+        "search_terms": ["AL", "NATL"],
+        "url_patterns": ["AL", "NATL"]
+    },
+    "East/Central Pacific (EPAC/CPAC)": {
+        "code": "EPAC", 
+        "search_terms": ["EP", "CP", "EPAC", "CPAC"],
+        "url_patterns": ["EP", "CP"]
+    },
+    "West Pacific (WPAC)": {
+        "code": "WPAC", 
+        "search_terms": ["WP", "WPAC"],
+        "url_patterns": ["WP", "WPAC"]
+    },
+    "Northern Indian Ocean (NIO)": {
+        "code": "NIO", 
+        "search_terms": ["IO", "NIO", "BB", "AS"],
+        "url_patterns": ["IO", "NI", "BB", "AS"]
+    },
+    "Southern Indian Ocean (SIO)": {
+        "code": "SIO", 
+        "search_terms": ["SI", "SIO"],
+        "url_patterns": ["SI", "SIO"]
+    },
+    "Australian Region (AUSW/AUSE)": {
+        "code": "AUS", 
+        "search_terms": ["AU", "SP", "AUSW", "AUSE"],
+        "url_patterns": ["AU", "SP"]
+    }
 }
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour
+@st.cache_data(ttl=3600)
 def get_intensity_color(wind_speed):
     """Return color and category for wind speed using Saffir-Simpson scale."""
     if pd.isna(wind_speed) or wind_speed < 34:
@@ -115,9 +139,36 @@ def format_datetime(datetime_str):
     except:
         return "N/A"
 
-@st.cache_data(ttl=7200)  # Cache for 2 hours
+def extract_basin_from_url(url):
+    """Extract basin code from IBTrACS URL."""
+    try:
+        # IBTrACS URLs contain basin info like: v04r01-1992236N25284 where the last part indicates basin
+        # Extract the storm ID part
+        match = re.search(r'v04r01-(\d{4})(\d{3})([NS])(\d+)', url)
+        if match:
+            year, day_of_year, hemisphere, number = match.groups()
+            
+            # Additional parsing based on URL patterns and known IBTrACS structure
+            if 'AL' in url or 'NATL' in url:
+                return 'NATL'
+            elif 'EP' in url or 'CP' in url:
+                return 'EPAC'
+            elif 'WP' in url:
+                return 'WPAC'
+            elif 'IO' in url or 'NI' in url or 'BB' in url or 'AS' in url:
+                return 'NIO'
+            elif 'SI' in url:
+                return 'SIO'
+            elif 'AU' in url or 'SP' in url:
+                return 'AUS'
+        
+        return 'UNKNOWN'
+    except:
+        return 'UNKNOWN'
+
+@st.cache_data(ttl=7200)
 def get_storms_for_basin_year(basin_name, year):
-    """Get list of storms for a specific basin and year."""
+    """Get list of storms for a specific basin and year with proper filtering."""
     try:
         year_page_url = f"https://ncics.org/ibtracs/index.php?name=YearBasin-{year}"
         
@@ -126,7 +177,7 @@ def get_storms_for_basin_year(basin_name, year):
         soup = BeautifulSoup(response.content, 'html.parser')
         
         basin_config = BASINS[basin_name]
-        search_terms = basin_config["search_terms"]
+        url_patterns = basin_config["url_patterns"]
         
         storms = []
         
@@ -136,17 +187,47 @@ def get_storms_for_basin_year(basin_name, year):
                 storm_text = link.text.strip()
                 link_url = urljoin(year_page_url, link['href'])
                 
-                # Check if storm belongs to the selected basin
-                # This is a simplified check - in reality, we'd need to parse the storm data
-                # For now, we'll include all storms and let users filter
-                if storm_text and len(storm_text) > 0:
-                    # Extract storm name (usually after the basin code)
+                # Extract basin from URL or storm text
+                detected_basin = extract_basin_from_url(link_url)
+                
+                # Check if storm belongs to selected basin
+                basin_match = False
+                
+                # Method 1: Check detected basin
+                if detected_basin == basin_config["code"]:
+                    basin_match = True
+                
+                # Method 2: Check URL patterns
+                if not basin_match:
+                    for pattern in url_patterns:
+                        if pattern.lower() in link_url.lower() or pattern.lower() in storm_text.lower():
+                            basin_match = True
+                            break
+                
+                # Method 3: Geographic logic for some basins
+                if not basin_match and storm_text:
+                    try:
+                        # Quick geographic check for some obvious cases
+                        if basin_name == "Atlantic (NATL)" and any(term in storm_text.upper() for term in ['AL', 'ATLANTIC']):
+                            basin_match = True
+                        elif basin_name == "West Pacific (WPAC)" and any(term in storm_text.upper() for term in ['WP', 'WPAC']):
+                            basin_match = True
+                    except:
+                        pass
+                
+                if basin_match and storm_text and len(storm_text) > 0:
+                    # Extract clean storm name
                     storm_name = storm_text.split()[-1] if ' ' in storm_text else storm_text
+                    
                     storms.append({
                         'display_name': storm_text,
                         'storm_name': storm_name,
-                        'url': link_url
+                        'url': link_url,
+                        'basin': detected_basin
                     })
+        
+        # Sort storms by name
+        storms.sort(key=lambda x: x['storm_name'])
         
         return storms
         
@@ -270,200 +351,208 @@ def extract_storm_data(storm_url):
 def create_storm_plot(storm_data, storm_name, year, basin_name):
     """Create the storm track visualization for Streamlit."""
     
-    # Calculate geographic bounds
-    lat_min, lat_max = storm_data['lat'].min(), storm_data['lat'].max()
-    lon_min, lon_max = storm_data['lon'].min(), storm_data['lon'].max()
-    
-    # Add padding
-    lat_range = lat_max - lat_min
-    lon_range = lon_max - lon_min
-    padding = max(lat_range, lon_range) * 0.25
-    
-    map_bounds = {
-        'llcrnrlon': lon_min - padding,
-        'llcrnrlat': lat_min - padding,
-        'urcrnrlon': lon_max + padding,
-        'urcrnrlat': lat_max + padding
-    }
-    
-    # Determine storm type
-    lat_center = (lat_min + lat_max) / 2
-    lon_center = (lon_min + lon_max) / 2
-    storm_type = determine_storm_type(lat_center, lon_center)
-    
-    # Create figure and basemap
-    fig, ax = plt.subplots(figsize=(16, 11))
-    
-    basemap = Basemap(
-        projection='cyl',
-        resolution='i',
-        **map_bounds,
-        ax=ax
-    )
-    
-    # Add shaded relief background
-    basemap.shadedrelief(scale=0.5)
-    
-    # Add geographic features
-    basemap.drawcoastlines(linewidth=1.5, color='white')
-    basemap.drawcountries(linewidth=1.0, color='white')
-    
-    # Add coordinate grid
-    parallels = np.arange(-90, 90, 5)
-    meridians = np.arange(-180, 180, 5)
-    basemap.drawparallels(parallels, labels=[1,0,0,0], fontsize=9, color='white')
-    basemap.drawmeridians(meridians, labels=[0,0,0,1], fontsize=9, color='white')
-    
-    # Convert coordinates to map projection
-    track_x, track_y = basemap(storm_data['lon'].values, storm_data['lat'].values)
-    
-    # Plot storm track line
-    basemap.plot(track_x, track_y, color='white', linewidth=5, alpha=0.9, zorder=10)
-    basemap.plot(track_x, track_y, color='black', linewidth=3, alpha=0.9, zorder=11)
-    
-    # Plot intensity points
-    has_wind_data = not storm_data['wind'].isna().all()
-    categories_list = []
-    
-    for idx, point in storm_data.iterrows():
-        if has_wind_data and not pd.isna(point['wind']):
-            color, category = get_intensity_color(point['wind'])
-        else:
-            color, category = 'No Data'
-        categories_list.append(category)
+    try:
+        # Calculate geographic bounds
+        lat_min, lat_max = storm_data['lat'].min(), storm_data['lat'].max()
+        lon_min, lon_max = storm_data['lon'].min(), storm_data['lon'].max()
         
-        x, y = basemap(point['lon'], point['lat'])
-        ax.scatter(x, y, c=color, s=70, edgecolors='black', 
-                   linewidth=1.8, zorder=12, alpha=0.95)
-    
-    # Add start and end markers
-    start_x, start_y = basemap(storm_data.iloc[0]['lon'], storm_data.iloc[0]['lat'])
-    end_x, end_y = basemap(storm_data.iloc[-1]['lon'], storm_data.iloc[-1]['lat'])
-    
-    ax.scatter(start_x, start_y, marker='s', s=180, c='lime', 
-               edgecolors='black', linewidth=2.5, zorder=15)
-    ax.scatter(end_x, end_y, marker='s', s=180, c='red', 
-               edgecolors='black', linewidth=2.5, zorder=15)
-    
-    # Smart positioning for annotations
-    start_time = format_datetime(storm_data.iloc[0]['datetime'])
-    end_time = format_datetime(storm_data.iloc[-1]['datetime'])
-    
-    # Calculate safe positioning for annotations
-    if len(storm_data) > 1:
-        start_dx = track_x[1] - track_x[0]
-        start_dy = track_y[1] - track_y[0]
-        track_length = np.sqrt(start_dx**2 + start_dy**2)
-        if track_length > 0:
-            perp_x = -start_dy / track_length * 60
-            perp_y = start_dx / track_length * 60
-            start_offset = (perp_x + 50, perp_y + 20)
+        # Add padding
+        lat_range = lat_max - lat_min
+        lon_range = lon_max - lon_min
+        padding = max(lat_range, lon_range) * 0.25
+        
+        map_bounds = {
+            'llcrnrlon': lon_min - padding,
+            'llcrnrlat': lat_min - padding,
+            'urcrnrlon': lon_max + padding,
+            'urcrnrlat': lat_max + padding
+        }
+        
+        # Determine storm type
+        lat_center = (lat_min + lat_max) / 2
+        lon_center = (lon_min + lon_max) / 2
+        storm_type = determine_storm_type(lat_center, lon_center)
+        
+        # Create figure and basemap
+        fig, ax = plt.subplots(figsize=(16, 11))
+        
+        basemap = Basemap(
+            projection='cyl',
+            resolution='i',
+            **map_bounds,
+            ax=ax
+        )
+        
+        # Add shaded relief background
+        basemap.shadedrelief(scale=0.5)
+        
+        # Add geographic features
+        basemap.drawcoastlines(linewidth=1.5, color='white')
+        basemap.drawcountries(linewidth=1.0, color='white')
+        
+        # Add coordinate grid
+        parallels = np.arange(-90, 90, 5)
+        meridians = np.arange(-180, 180, 5)
+        basemap.drawparallels(parallels, labels=[1,0,0,0], fontsize=9, color='white')
+        basemap.drawmeridians(meridians, labels=[0,0,0,1], fontsize=9, color='white')
+        
+        # Convert coordinates to map projection
+        track_x, track_y = basemap(storm_data['lon'].values, storm_data['lat'].values)
+        
+        # Plot storm track line
+        basemap.plot(track_x, track_y, color='white', linewidth=5, alpha=0.9, zorder=10)
+        basemap.plot(track_x, track_y, color='black', linewidth=3, alpha=0.9, zorder=11)
+        
+        # Plot intensity points
+        has_wind_data = not storm_data['wind'].isna().all()
+        categories_list = []
+        
+        for idx, point in storm_data.iterrows():
+            if has_wind_data and not pd.isna(point['wind']):
+                color, category = get_intensity_color(point['wind'])
+            else:
+                color, category = 'white', 'No Data'
+            categories_list.append(category)
+            
+            x, y = basemap(point['lon'], point['lat'])
+            ax.scatter(x, y, c=color, s=70, edgecolors='black', 
+                       linewidth=1.8, zorder=12, alpha=0.95)
+        
+        # Add start and end markers
+        start_x, start_y = basemap(storm_data.iloc[0]['lon'], storm_data.iloc[0]['lat'])
+        end_x, end_y = basemap(storm_data.iloc[-1]['lon'], storm_data.iloc[-1]['lat'])
+        
+        ax.scatter(start_x, start_y, marker='s', s=180, c='lime', 
+                   edgecolors='black', linewidth=2.5, zorder=15)
+        ax.scatter(end_x, end_y, marker='s', s=180, c='red', 
+                   edgecolors='black', linewidth=2.5, zorder=15)
+        
+        # Smart positioning for annotations to avoid track overlap
+        start_time = format_datetime(storm_data.iloc[0]['datetime'])
+        end_time = format_datetime(storm_data.iloc[-1]['datetime'])
+        
+        # Calculate safe positioning for annotations
+        if len(storm_data) > 1:
+            try:
+                start_dx = track_x[1] - track_x[0]
+                start_dy = track_y[1] - track_y[0]
+                track_length = np.sqrt(start_dx**2 + start_dy**2)
+                if track_length > 0:
+                    perp_x = -start_dy / track_length * 60
+                    perp_y = start_dx / track_length * 60
+                    start_offset = (perp_x + 50, perp_y + 20)
+                else:
+                    start_offset = (60, 30)
+                
+                end_dx = track_x[-1] - track_x[-2]
+                end_dy = track_y[-1] - track_y[-2]
+                track_length = np.sqrt(end_dx**2 + end_dy**2)
+                if track_length > 0:
+                    perp_x = -end_dy / track_length * 60
+                    perp_y = end_dx / track_length * 60
+                    end_offset = (perp_x + 50, perp_y - 20)
+                else:
+                    end_offset = (60, -30)
+            except:
+                start_offset = (60, 30)
+                end_offset = (60, -30)
         else:
             start_offset = (60, 30)
-        
-        end_dx = track_x[-1] - track_x[-2]
-        end_dy = track_y[-1] - track_y[-2]
-        track_length = np.sqrt(end_dx**2 + end_dy**2)
-        if track_length > 0:
-            perp_x = -end_dy / track_length * 60
-            perp_y = end_dx / track_length * 60
-            end_offset = (perp_x + 50, perp_y - 20)
-        else:
             end_offset = (60, -30)
-    else:
-        start_offset = (60, 30)
-        end_offset = (60, -30)
-    
-    # Add annotations
-    ax.annotate(f'Start: {start_time}', xy=(start_x, start_y), xytext=start_offset,
-                textcoords='offset points', 
-                bbox=dict(boxstyle='round,pad=0.4', facecolor='lime', alpha=0.85),
-                fontsize=10, weight='bold', zorder=20,
-                arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.1', 
-                              color='darkgreen', lw=2))
-    
-    ax.annotate(f'End: {end_time}', xy=(end_x, end_y), xytext=end_offset,
-                textcoords='offset points',
-                bbox=dict(boxstyle='round,pad=0.4', facecolor='red', alpha=0.85),
-                fontsize=10, weight='bold', zorder=20,
-                arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.1', 
-                              color='darkred', lw=2))
-    
-    # Create intensity legend
-    if has_wind_data:
-        legend_elements = [
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=8, 
-                      markeredgecolor='black', label='TD (<34 kt)', linewidth=0),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#F5F5DC', markersize=8, 
-                      markeredgecolor='black', label='TS (34-63 kt)', linewidth=0),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFCC5C', markersize=8, 
-                      markeredgecolor='black', label='Cat 1 (64-82 kt)', linewidth=0),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FF8C00', markersize=8, 
-                      markeredgecolor='black', label='Cat 2 (83-95 kt)', linewidth=0),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FF0000', markersize=8, 
-                      markeredgecolor='black', label='Cat 3 (96-112 kt)', linewidth=0),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#8B008B', markersize=8, 
-                      markeredgecolor='black', label='Cat 4 (113-136 kt)', linewidth=0),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#000000', markersize=8, 
-                      markeredgecolor='black', label='Cat 5 (137+ kt)', linewidth=0),
-        ]
-    else:
-        legend_elements = [
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=8, 
-                      markeredgecolor='black', label='No Wind Data', linewidth=0),
-        ]
-    
-    legend = ax.legend(handles=legend_elements, loc='upper left', 
-                      bbox_to_anchor=(0.02, 0.97), fontsize=9,
-                      fancybox=True, shadow=True, framealpha=0.92)
-    legend.get_frame().set_facecolor('white')
-    
-    # Calculate statistics
-    max_wind = storm_data['wind'].max() if has_wind_data else np.nan
-    max_wind_mph = convert_knots_to_mph(max_wind)
-    min_pressure = storm_data['pressure'].min() if not storm_data['pressure'].isna().all() else np.nan
-    ace_value = calculate_ace_value(storm_data['wind']) if has_wind_data else 0
-    
-    # Add info boxes
-    intensity_info = ""
-    if not pd.isna(max_wind):
-        intensity_info += f"Max Winds: {max_wind:.0f}kt ({max_wind_mph}mph)\n"
-    else:
-        intensity_info += "Max Winds: N/A\n"
-    
-    if not pd.isna(min_pressure):
-        intensity_info += f"Min Pressure: {min_pressure:.0f}mb"
-    else:
-        intensity_info += "Min Pressure: N/A"
-    
-    ax.text(0.98, 0.02, intensity_info, transform=ax.transAxes,
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.9),
-            fontsize=10, weight='bold', ha='right', va='bottom')
-    
-    ace_info = f"ACE: {ace_value:.1f}" if ace_value > 0 else "ACE: N/A"
-    ax.text(0.98, 0.98, ace_info, transform=ax.transAxes,
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9),
-            fontsize=10, weight='bold', ha='right', va='top')
-    
-    # Set title
-    ax.set_title(f'{storm_type} {storm_name} ({year})', 
-                fontsize=20, fontweight='bold', pad=25)
-    
-    plt.tight_layout()
-    
-    return fig, {
-        'storm_type': storm_type,
-        'max_wind': max_wind,
-        'max_wind_mph': max_wind_mph,
-        'min_pressure': min_pressure,
-        'ace_value': ace_value,
-        'track_points': len(storm_data),
-        'duration_hours': len(storm_data) * 6,
-        'duration_days': len(storm_data) * 6 / 24,
-        'lat_extent': (lat_min, lat_max),
-        'lon_extent': (lon_min, lon_max),
-        'categories': categories_list
-    }
+        
+        # Add annotations with arrows
+        ax.annotate(f'Start: {start_time}', xy=(start_x, start_y), xytext=start_offset,
+                    textcoords='offset points', 
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='lime', alpha=0.85),
+                    fontsize=10, weight='bold', zorder=20,
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.1', 
+                                  color='darkgreen', lw=2))
+        
+        ax.annotate(f'End: {end_time}', xy=(end_x, end_y), xytext=end_offset,
+                    textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='red', alpha=0.85),
+                    fontsize=10, weight='bold', zorder=20,
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.1', 
+                                  color='darkred', lw=2))
+        
+        # Create intensity legend
+        if has_wind_data:
+            legend_elements = [
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=8, 
+                          markeredgecolor='black', label='TD (<34 kt)', linewidth=0),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#F5F5DC', markersize=8, 
+                          markeredgecolor='black', label='TS (34-63 kt)', linewidth=0),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFCC5C', markersize=8, 
+                          markeredgecolor='black', label='Cat 1 (64-82 kt)', linewidth=0),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FF8C00', markersize=8, 
+                          markeredgecolor='black', label='Cat 2 (83-95 kt)', linewidth=0),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FF0000', markersize=8, 
+                          markeredgecolor='black', label='Cat 3 (96-112 kt)', linewidth=0),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#8B008B', markersize=8, 
+                          markeredgecolor='black', label='Cat 4 (113-136 kt)', linewidth=0),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#000000', markersize=8, 
+                          markeredgecolor='black', label='Cat 5 (137+ kt)', linewidth=0),
+            ]
+        else:
+            legend_elements = [
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=8, 
+                          markeredgecolor='black', label='No Wind Data', linewidth=0),
+            ]
+        
+        legend = ax.legend(handles=legend_elements, loc='upper left', 
+                          bbox_to_anchor=(0.02, 0.97), fontsize=9,
+                          fancybox=True, shadow=True, framealpha=0.92)
+        legend.get_frame().set_facecolor('white')
+        
+        # Calculate statistics
+        max_wind = storm_data['wind'].max() if has_wind_data else np.nan
+        max_wind_mph = convert_knots_to_mph(max_wind)
+        min_pressure = storm_data['pressure'].min() if not storm_data['pressure'].isna().all() else np.nan
+        ace_value = calculate_ace_value(storm_data['wind']) if has_wind_data else 0
+        
+        # Add info boxes
+        intensity_info = ""
+        if not pd.isna(max_wind):
+            intensity_info += f"Max Winds: {max_wind:.0f}kt ({max_wind_mph}mph)\n"
+        else:
+            intensity_info += "Max Winds: N/A\n"
+        
+        if not pd.isna(min_pressure):
+            intensity_info += f"Min Pressure: {min_pressure:.0f}mb"
+        else:
+            intensity_info += "Min Pressure: N/A"
+        
+        ax.text(0.98, 0.02, intensity_info, transform=ax.transAxes,
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.9),
+                fontsize=10, weight='bold', ha='right', va='bottom')
+        
+        ace_info = f"ACE: {ace_value:.1f}" if ace_value > 0 else "ACE: N/A"
+        ax.text(0.98, 0.98, ace_info, transform=ax.transAxes,
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9),
+                fontsize=10, weight='bold', ha='right', va='top')
+        
+        # Set title
+        ax.set_title(f'{storm_type} {storm_name} ({year})', 
+                    fontsize=20, fontweight='bold', pad=25)
+        
+        plt.tight_layout()
+        
+        return fig, {
+            'storm_type': storm_type,
+            'max_wind': max_wind,
+            'max_wind_mph': max_wind_mph,
+            'min_pressure': min_pressure,
+            'ace_value': ace_value,
+            'track_points': len(storm_data),
+            'duration_hours': len(storm_data) * 6,
+            'duration_days': len(storm_data) * 6 / 24,
+            'lat_extent': (lat_min, lat_max),
+            'lon_extent': (lon_min, lon_max),
+            'categories': categories_list
+        }
+        
+    except Exception as e:
+        raise Exception(f"Error creating storm plot: {e}")
 
 def main():
     """Main Streamlit application."""
@@ -472,150 +561,152 @@ def main():
     st.title("🌀 Tropical Cyclone Track Plotter")
     st.markdown("*Interactive visualization of historical tropical cyclone tracks from IBTrACS*")
     
-    # Sidebar for controls
-    st.sidebar.header("Select Storm Parameters")
-    
-    # Basin selection
-    selected_basin = st.sidebar.selectbox(
-        "🌊 Select Basin:",
-        list(BASINS.keys()),
-        help="Choose the oceanic basin where the storm occurred"
-    )
-    
-    # Year selection
-    current_year = 2024
-    selected_year = st.sidebar.selectbox(
-        "📅 Select Year:",
-        range(current_year, 1841, -1),  # IBTrACS goes back to 1842
-        help="Choose the year when the storm occurred"
-    )
-    
-    # Storm selection (only show after basin and year are selected)
-    if selected_basin and selected_year:
-        with st.spinner(f"Loading storms for {selected_basin} {selected_year}..."):
-            storms = get_storms_for_basin_year(selected_basin, selected_year)
-        
-        if storms:
-            storm_options = {storm['display_name']: storm for storm in storms}
-            
-            selected_storm_display = st.sidebar.selectbox(
-                "🌀 Select Storm:",
-                [""] + list(storm_options.keys()),
-                help="Choose the specific storm to visualize"
-            )
-            
-            # Generate plot button
-            if selected_storm_display and st.sidebar.button("🚀 Generate Storm Track Plot", type="primary"):
-                selected_storm = storm_options[selected_storm_display]
-                
-                try:
-                    with st.spinner(f"Generating plot for {selected_storm['storm_name']}..."):
-                        # Extract storm data
-                        storm_data = extract_storm_data(selected_storm['url'])
-                        
-                        # Create plot
-                        fig, stats = create_storm_plot(
-                            storm_data, 
-                            selected_storm['storm_name'], 
-                            selected_year, 
-                            selected_basin
-                        )
-                        
-                        # Display plot
-                        st.pyplot(fig)
-                        plt.close(fig)  # Prevent memory leaks
-                        
-                        # Display statistics
-                        st.subheader(f"📊 {stats['storm_type']} {selected_storm['storm_name']} ({selected_year}) Statistics")
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        with col1:
-                            st.metric("Duration", f"{stats['duration_days']:.1f} days")
-                            st.metric("Track Points", f"{stats['track_points']}")
-                        
-                        with col2:
-                            if not pd.isna(stats['max_wind']):
-                                st.metric("Peak Winds", f"{stats['max_wind']:.0f} kt")
-                                st.metric("Peak Winds (mph)", f"{stats['max_wind_mph']} mph")
-                            else:
-                                st.metric("Peak Winds", "N/A")
-                        
-                        with col3:
-                            if not pd.isna(stats['min_pressure']):
-                                st.metric("Min Pressure", f"{stats['min_pressure']:.0f} mb")
-                            else:
-                                st.metric("Min Pressure", "N/A")
-                            
-                            if stats['ace_value'] > 0:
-                                st.metric("ACE Value", f"{stats['ace_value']:.1f}")
-                            else:
-                                st.metric("ACE Value", "N/A")
-                        
-                        with col4:
-                            lat_min, lat_max = stats['lat_extent']
-                            lon_min, lon_max = stats['lon_extent']
-                            st.metric("Latitude Range", f"{lat_min:.1f}°N to {lat_max:.1f}°N")
-                            st.metric("Longitude Range", f"{lon_min:.1f}°E to {lon_max:.1f}°E")
-                        
-                        # Intensity breakdown
-                        if stats['categories']:
-                            st.subheader("🎯 Intensity Distribution")
-                            cat_counts = pd.Series(stats['categories']).value_counts()
-                            
-                            intensity_data = []
-                            for cat in ['TD', 'TS', 'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']:
-                                if cat in cat_counts:
-                                    intensity_data.append({
-                                        'Category': cat,
-                                        'Points': cat_counts[cat],
-                                        'Hours': cat_counts[cat] * 6
-                                    })
-                            
-                            if intensity_data:
-                                st.dataframe(pd.DataFrame(intensity_data), use_container_width=True)
-                        
-                except Exception as e:
-                    st.error(f"Error generating plot: {e}")
-                    st.info("Please try a different storm or check your internet connection.")
-        
-        else:
-            st.sidebar.warning(f"No storms found for {selected_basin} in {selected_year}")
-    
-    # Information section
-    st.markdown("---")
-    st.subheader("ℹ️ About This Application")
-    
-    col1, col2 = st.columns(2)
+    # Main content columns
+    col1, col2 = st.columns([2, 3])
     
     with col1:
-        st.markdown("""
-        **Features:**
-        - 🌍 Interactive basin and year selection
-        - 🌀 Comprehensive storm database from IBTrACS
-        - 🗺️ High-resolution shaded relief backgrounds
-        - 📊 Detailed storm statistics and intensity analysis
-        - 🎨 Color-coded intensity visualization using Saffir-Simpson scale
-        """)
+        st.subheader("🌊 Storm Selection")
+        
+        # Basin selection
+        selected_basin = st.selectbox(
+            "Select Basin:",
+            list(BASINS.keys()),
+            help="Choose the oceanic basin where the storm occurred"
+        )
+        
+        # Year selection
+        current_year = 2024
+        selected_year = st.selectbox(
+            "Select Year:",
+            range(current_year, 1841, -1),
+            help="Choose the year when the storm occurred"
+        )
+        
+        # Storm selection (only show after basin and year are selected)
+        if selected_basin and selected_year:
+            with st.spinner(f"Loading storms for {selected_basin} {selected_year}..."):
+                storms = get_storms_for_basin_year(selected_basin, selected_year)
+            
+            if storms:
+                storm_options = {storm['display_name']: storm for storm in storms}
+                
+                selected_storm_display = st.selectbox(
+                    "Select Storm:",
+                    [""] + list(storm_options.keys()),
+                    help="Choose the specific storm to visualize"
+                )
+                
+                if selected_storm_display:
+                    st.info(f"⏱️ **Processing Time:** 1-2 minutes for data download and plotting")
+                
+                # Generate plot button
+                generate_button = st.button("🚀 Generate Storm Track Plot", type="primary")
+            else:
+                st.warning(f"No storms found for {selected_basin} in {selected_year}")
+                generate_button = False
+        else:
+            generate_button = False
     
     with col2:
-        st.markdown("""
-        **Data Source:**
-        - International Best Track Archive for Climate Stewardship (IBTrACS)
-        - 6-hour interval storm positions
-        - Wind speeds, pressures, and track coordinates
-        - Historical data from 1842 to present
-        """)
+        st.subheader("📊 Storm Track Visualization")
+        
+        if generate_button and selected_storm_display:
+            selected_storm = storm_options[selected_storm_display]
+            
+            try:
+                with st.spinner(f"Generating plot for {selected_storm['storm_name']}..."):
+                    # Extract storm data
+                    storm_data = extract_storm_data(selected_storm['url'])
+                    
+                    # Create plot
+                    fig, stats = create_storm_plot(
+                        storm_data, 
+                        selected_storm['storm_name'], 
+                        selected_year, 
+                        selected_basin
+                    )
+                    
+                    # Display plot
+                    st.pyplot(fig, use_container_width=True)
+                    plt.close(fig)
+                    gc.collect()
+                    
+                    st.success("✅ Storm track plot generated successfully!")
+                    st.info("💡 Right-click on the plot to save it to your device.")
+                    
+                    # Display statistics
+                    st.subheader(f"📊 {stats['storm_type']} {selected_storm['storm_name']} ({selected_year}) Statistics")
+                    
+                    col1_stats, col2_stats, col3_stats, col4_stats = st.columns(4)
+                    
+                    with col1_stats:
+                        st.metric("Duration", f"{stats['duration_days']:.1f} days")
+                        st.metric("Track Points", f"{stats['track_points']}")
+                    
+                    with col2_stats:
+                        if not pd.isna(stats['max_wind']):
+                            st.metric("Peak Winds", f"{stats['max_wind']:.0f} kt")
+                            st.metric("Peak Winds (mph)", f"{stats['max_wind_mph']} mph")
+                        else:
+                            st.metric("Peak Winds", "N/A")
+                    
+                    with col3_stats:
+                        if not pd.isna(stats['min_pressure']):
+                            st.metric("Min Pressure", f"{stats['min_pressure']:.0f} mb")
+                        else:
+                            st.metric("Min Pressure", "N/A")
+                        
+                        if stats['ace_value'] > 0:
+                            st.metric("ACE Value", f"{stats['ace_value']:.1f}")
+                        else:
+                            st.metric("ACE Value", "N/A")
+                    
+                    with col4_stats:
+                        lat_min, lat_max = stats['lat_extent']
+                        lon_min, lon_max = stats['lon_extent']
+                        st.metric("Latitude Range", f"{lat_min:.1f}°N to {lat_max:.1f}°N")
+                        st.metric("Longitude Range", f"{lon_min:.1f}°E to {lon_max:.1f}°E")
+                    
+                    # Intensity breakdown
+                    if stats['categories']:
+                        st.subheader("🎯 Intensity Distribution")
+                        cat_counts = pd.Series(stats['categories']).value_counts()
+                        
+                        intensity_data = []
+                        for cat in ['TD', 'TS', 'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']:
+                            if cat in cat_counts:
+                                intensity_data.append({
+                                    'Category': cat,
+                                    'Points': cat_counts[cat],
+                                    'Hours': cat_counts[cat] * 6
+                                })
+                        
+                        if intensity_data:
+                            st.dataframe(pd.DataFrame(intensity_data), use_container_width=True)
+                    
+            except Exception as e:
+                st.error(f"❌ Error generating plot: {e}")
+                st.info("💡 Please try a different storm or check your internet connection.")
+        
+        elif not selected_basin or not selected_year:
+            st.info("👆 Please select a basin and year from the dropdown menus on the left.")
+        
+        elif not selected_storm_display:
+            st.info("👆 Please select a storm from the dropdown menu on the left.")
     
-    st.markdown("""
-    **Basin Coverage:**
-    - 🌊 Atlantic (NATL) - Hurricanes
-    - 🌊 East/Central Pacific (EPAC/CPAC) - Hurricanes  
-    - 🌊 West Pacific (WPAC) - Typhoons
-    - 🌊 Northern Indian Ocean (NIO) - Cyclones
-    - 🌊 Southern Indian Ocean (SIO) - Cyclones
-    - 🌊 Australian Region (AUSW/AUSE) - Cyclones
-    """)
+    # About section at bottom
+    st.markdown("---")
+    with st.expander("ℹ️ About This Application"):
+        st.markdown("""
+        **Interactive Tropical Cyclone Track Plotter** powered by IBTrACS (International Best Track Archive for Climate Stewardship)
+        
+        **Features:**
+        - 🌍 Six major tropical cyclone basins
+        - 📅 Historical data from 1842 to present
+        - 🎨 Saffir-Simpson intensity color coding
+        - 📊 Comprehensive storm statistics
+        - 🗺️ High-resolution shaded relief backgrounds
+        """)
 
 if __name__ == "__main__":
     main()
