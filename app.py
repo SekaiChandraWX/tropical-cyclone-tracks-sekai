@@ -64,11 +64,11 @@ BASINS = {
 def get_intensity_color(wind_speed):
     """Return color and category for wind speed using Saffir-Simpson scale."""
     if pd.isna(wind_speed) or wind_speed < 34:
-        return '#91E6A9', 'TD'
+        return '#09610D', 'TD'
     elif wind_speed < 64:
-        return '#5BDEF0', 'TS'
+        return '#127987', 'TS'
     elif wind_speed < 83:
-        return '#FFCC5C', 'Cat1'
+        return 'white', 'Cat1'
     elif wind_speed < 96:
         return '#FF8C00', 'Cat2'
     elif wind_speed < 113:
