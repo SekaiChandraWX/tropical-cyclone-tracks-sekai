@@ -644,7 +644,7 @@ def main():
                 )
                 
                 if selected_storm_display:
-                    st.info(f"⏱️ **Processing Time:** 1-2 minutes for data download and plotting")
+                    st.info(f"⏱️ **Processing Time:** 5-10 seconds for data download and plotting")
                 
                 # Generate plot button
                 generate_button = st.button("🚀 Generate Storm Track Plot", type="primary")
