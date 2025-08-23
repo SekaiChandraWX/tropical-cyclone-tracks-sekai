@@ -571,7 +571,7 @@ def create_storm_plot(storm_data, storm_name, year, basin_name):
         # Bottom left: Attribution watermark
         ax.text(0.02, 0.02, 'Plotted by Sekai Chandra (@Sekai_WX)', transform=ax.transAxes,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.8),
-                fontsize=8, style='italic', ha='left', va='bottom')
+                fontsize=10, style='bold', ha='left', va='bottom')
         
         # Set title
         ax.set_title(f'{storm_type} {storm_name} ({year})', 
