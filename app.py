@@ -64,7 +64,7 @@ BASINS = {
 def get_intensity_color(wind_speed):
     """Return color and category for wind speed using Saffir-Simpson scale."""
     if pd.isna(wind_speed) or wind_speed < 34:
-        return '#09610D', 'TD'
+        return '#8AED8F', 'TD'
     elif wind_speed < 64:
         return '#127987', 'TS'
     elif wind_speed < 83:
@@ -513,11 +513,11 @@ def create_storm_plot(storm_data, storm_name, year, basin_name):
         # Create intensity legend
         if has_wind_data:
             legend_elements = [
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=8, 
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#8AED8F', markersize=8, 
                           markeredgecolor='black', label='TD (<34 kt)', linewidth=0),
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#F5F5DC', markersize=8, 
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#127987', markersize=8, 
                           markeredgecolor='black', label='TS (34-63 kt)', linewidth=0),
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFCC5C', markersize=8, 
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=8, 
                           markeredgecolor='black', label='Cat 1 (64-82 kt)', linewidth=0),
                 plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FF8C00', markersize=8, 
                           markeredgecolor='black', label='Cat 2 (83-95 kt)', linewidth=0),
