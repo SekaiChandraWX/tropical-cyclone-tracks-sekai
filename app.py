@@ -557,18 +557,21 @@ def create_storm_plot(storm_data, storm_name, year, basin_name):
         else:
             intensity_info += "Min Pressure: N/A"
         
-        ax.text(0.98, 0.08, intensity_info, transform=ax.transAxes,
+        # Bottom right: Max intensity box
+        ax.text(0.98, 0.02, intensity_info, transform=ax.transAxes,
                 bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.9),
                 fontsize=10, weight='bold', ha='right', va='bottom')
         
+        # Top right: ACE box
         ace_info = f"ACE: {ace_value:.1f}" if ace_value > 0 else "ACE: N/A"
         ax.text(0.98, 0.98, ace_info, transform=ax.transAxes,
                 bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9),
                 fontsize=10, weight='bold', ha='right', va='top')
         
-        # Add attribution/trademark
-        plt.figtext(0.98, 0.02, 'Plotted by Sekai Chandra (@Sekai_WX)',
-                    ha='right', fontsize=8, style='italic', color='black')
+        # Bottom left: Attribution watermark
+        ax.text(0.02, 0.02, 'Plotted by Sekai Chandra (@Sekai_WX)', transform=ax.transAxes,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.8),
+                fontsize=8, style='italic', ha='left', va='bottom')
         
         # Set title
         ax.set_title(f'{storm_type} {storm_name} ({year})', 
