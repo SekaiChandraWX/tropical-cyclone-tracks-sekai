@@ -600,14 +600,14 @@ def main():
     """Main Streamlit application."""
     
     # Title and description
-    st.title("🌀 Tropical Cyclone Track Plotter")
+    st.title("Tropical Cyclone Track Plotter")
     st.markdown("*Interactive visualization of historical tropical cyclone tracks from IBTrACS*")
     
     # Main content columns
     col1, col2 = st.columns([2, 3])
     
     with col1:
-        st.subheader("🌊 Storm Selection")
+        st.subheader("Storm Selection")
         
         # Basin selection
         selected_basin = st.selectbox(
@@ -644,16 +644,16 @@ def main():
                 )
                 
                 if selected_storm_display:
-                    st.info(f"⏱️ **Processing Time:** 5-10 seconds for data download and plotting")
+                    st.info(f"**Processing Time:** 5-10 seconds for data download and plotting")
                 
                 # Generate plot button
-                generate_button = st.button("🚀 Generate Storm Track Plot", type="primary")
+                generate_button = st.button("Generate Storm Track Plot", type="primary")
             else:
                 st.warning(f"No storms found for {selected_basin} in {selected_year}")
                 st.info(f"💡 Try a different year - some years may have limited data for {selected_basin}")
     
     with col2:
-        st.subheader("📊 Storm Track Visualization")
+        st.subheader("Storm Track Visualization")
         
         if generate_button and selected_storm_display and selected_storm_display != "":
             selected_storm = storm_options[selected_storm_display]
